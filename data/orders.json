@@ -1,6 +1,6 @@
 [
   {
-    "id": "39-4835",
+    "id": "80-9705",
     "shopper_id": "demo-shopper",
     "lines": [
       {
@@ -24,35 +24,7 @@
     ],
     "total": 11410,
     "address": "House 12, Dhanmondi",
-    "placed_at": "2026-09-04T17:19:23+00:00",
-    "stage": "placed"
-  },
-  {
-    "id": "21-8570",
-    "shopper_id": "demo-shopper",
-    "lines": [
-      {
-        "sku": "HON-003",
-        "name": "Sundarban wild honey",
-        "quantity": 2,
-        "price": 850
-      },
-      {
-        "sku": "TOW-006",
-        "name": "Cotton hand towel, pair",
-        "quantity": 3,
-        "price": 480
-      },
-      {
-        "sku": "LMP-007",
-        "name": "Brass table lamp",
-        "quantity": 3,
-        "price": 3200
-      }
-    ],
-    "total": 12740,
-    "address": "House 12, Dhanmondi",
-    "placed_at": "2026-09-04T17:19:35+00:00",
+    "placed_at": "2026-09-04T17:43:32+00:00",
     "stage": "placed"
   }
 ]
