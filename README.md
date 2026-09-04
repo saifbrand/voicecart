@@ -65,6 +65,26 @@ Dhanmondi. Say yes to place the order.
 `place_order` refuses to run without `confirmed=true`. Asking twice is not
 friction here; it is the only review step that exists.
 
+**"The second one", because nobody says a SKU.** On a screen you point. In a
+conversation you refer back, so the shop remembers the last list it read to
+you and resolves against it.
+
+```
+  you    Show me the home and bath things.
+  alexa  Neem and turmeric soap, 140 taka. Cotton hand towel, 480 taka.
+         Brass table lamp, 3,200 taka, only 3 left. There is one more.
+
+  you    Add the second one.
+  alexa  Added Cotton hand towel, pair. Your basket is now 1,330 taka.
+```
+
+Positions, names and pointing all work, and the recent list wins over the
+rest of the shop: two products have cotton in the name, but right after
+hearing one of them, "add some cotton" is not ambiguous. When it genuinely
+is, nothing is added and the reply asks which, because putting the wrong
+thing in the basket of somebody who cannot see it is worse than asking
+twice.
+
 **Things you would have seen, said instead.** Allergens on food, every time.
 A warning when the parcel is heavy enough that somebody should be at the
 door. Low stock when there are three left. None of that is decoration on a
@@ -102,6 +122,10 @@ and `cards` to render only if there is a screen. Both are declared in the
 output schema, so a client knows there is a carousel to show without being
 told in prose.
 
+`describe_product`, `add_to_cart` and `remove_from_cart` take an `item`
+phrase rather than a SKU: a position, a name, or a bare "that one" all
+resolve, and an ambiguous phrase comes back as a question.
+
 Search matches whole spoken words, not substrings. Somebody says "honey",
 never "hon", and a substring match on "hon" would hand them honey as though
 they had asked for it.
@@ -136,7 +160,7 @@ python demo.py
 python -m pytest tests -q
 ```
 
-Fifteen tests. Fourteen cover the shop rules directly. The fifteenth starts
+Twenty six tests. All but one cover the shop rules directly. The last starts
 the server as its own process and drives a whole shopping trip through the
 MCP client over Streamable HTTP, so the transport, the protocol version, the
 tool schemas and the rules are all exercised together.
@@ -156,6 +180,7 @@ voicecart/
   server.py      the MCP server and its eleven tools
   models.py      the reply shape every tool declares
   speech.py      products turned into something worth hearing
+  refer.py       working out which product somebody meant
   catalogue.py   the storefront
   carts.py       baskets that outlive the conversation
   orders.py      placing and tracking, cash on delivery
@@ -163,6 +188,7 @@ data/
   catalogue.json the demo shop
 tests/
   test_voicecart.py    the shop rules
+  test_refer.py        what "the second one" means
   test_mcp_session.py  a whole trip over Streamable HTTP
 ```
 

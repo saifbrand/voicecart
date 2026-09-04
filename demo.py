@@ -16,6 +16,7 @@ import asyncio
 import os
 import sys
 import time
+from pathlib import Path
 
 from mcp import ClientSession
 from mcp.client.streamable_http import streamable_http_client
@@ -33,10 +34,14 @@ TRIP: list[tuple[str, str, dict]] = [
     ("Groceries.", "browse_category", {"category": "Groceries"}),
     ("What else is there?", "browse_category", {"category": "Groceries", "offset": 3}),
     ("Do you have honey?", "search_products", {"query": "honey"}),
-    ("Tell me more about it.", "describe_product", {"sku": "HON-003"}),
-    ("Add one.", "add_to_cart", {"sku": "HON-003", "quantity": 1}),
-    ("And the cashews.", "add_to_cart", {"sku": "NUT-004", "quantity": 1}),
-    ("Then nine of the brass lamp.", "add_to_cart", {"sku": "LMP-007", "quantity": 9}),
+    ("Tell me more about that one.", "describe_product", {"item": "that one"}),
+    ("Add it.", "add_to_cart", {"item": "the honey", "quantity": 1}),
+    ("Show me the home and bath things.", "browse_category",
+     {"category": "Home and bath"}),
+    ("Add the second one.", "add_to_cart", {"item": "the second one"}),
+    ("And nine of the brass lamp.", "add_to_cart",
+     {"item": "brass lamp", "quantity": 9}),
+    ("Add some cotton.", "add_to_cart", {"item": "cotton"}),
     ("What is in my basket?", "read_cart", {}),
     ("Order it to House 12, Dhanmondi.", "place_order",
      {"address": "House 12, Dhanmondi"}),
@@ -45,6 +50,17 @@ TRIP: list[tuple[str, str, dict]] = [
     ("Where is my order?", "order_status", {}),
     ("Order the usual again.", "reorder_last", {}),
 ]
+
+
+def fresh_start() -> None:
+    """Clear the demo shop's saved state so the trip reads the same every time.
+
+    Only sensible because the demo runs beside the server. A real client has
+    no business deleting the shop's files.
+    """
+    state = Path(os.environ.get("VOICECART_STATE_DIR") or Path(__file__).parent / "data")
+    for name in ("carts.json", "orders.json", "recent.json"):
+        (state / name).unlink(missing_ok=True)
 
 
 def wrap(text: str, indent: str = "        ") -> str:
@@ -97,7 +113,12 @@ def main() -> None:
     parser.add_argument("--url", default=os.environ.get(
         "VOICECART_URL", "http://127.0.0.1:8080/mcp"))
     parser.add_argument("--fast", action="store_true", help="no pauses")
+    parser.add_argument("--keep", action="store_true",
+                        help="keep the saved basket and orders from last time")
     args = parser.parse_args()
+
+    if not args.keep:
+        fresh_start()
 
     if sys.platform == "win32":
         os.system("")  # let the terminal interpret the colour codes

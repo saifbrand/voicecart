@@ -14,7 +14,7 @@ import os
 
 from mcp.server.mcpserver import MCPServer
 
-from voicecart import carts, catalogue, orders, speech
+from voicecart import carts, catalogue, orders, refer, speech
 from voicecart.models import VoiceReply
 
 DEFAULT_SHOPPER = "demo-shopper"
@@ -43,6 +43,26 @@ def _cart(shopper_id: str) -> carts.Cart:
     return carts.load(shopper_id or DEFAULT_SHOPPER)
 
 
+def _shown(reply: VoiceReply, shopper_id: str) -> VoiceReply:
+    """Remember what was just read out, so it can be referred back to.
+
+    Every list the shopper hears becomes the thing "the second one" and
+    "the honey" point at. Without this, a voice shopper has to name a SKU.
+    """
+    skus = [card.sku for card in reply.cards if card.sku]
+    if skus:
+        refer.remember(shopper_id or DEFAULT_SHOPPER, skus)
+    return reply
+
+
+def _pick(item: str, shopper_id: str) -> tuple[str | None, VoiceReply | None]:
+    """Resolve what the shopper said, or hand back the question to ask."""
+    found = refer.resolve(item, shopper_id or DEFAULT_SHOPPER)
+    if found.found:
+        return found.sku, None
+    return None, VoiceReply(speech=found.reason, ok=False)
+
+
 @server.tool()
 def list_categories() -> VoiceReply:
     """List the departments in the shop."""
@@ -56,7 +76,9 @@ def list_categories() -> VoiceReply:
 
 
 @server.tool()
-def browse_category(category: str, offset: int = 0) -> VoiceReply:
+def browse_category(
+    category: str, offset: int = 0, shopper_id: str = DEFAULT_SHOPPER
+) -> VoiceReply:
     """Read out the products in one department, three at a time.
 
     Pass the offset returned by the previous call to hear the next three.
@@ -68,11 +90,13 @@ def browse_category(category: str, offset: int = 0) -> VoiceReply:
             speech=f"There is no {category} section. We have {known}.",
             ok=False,
         )
-    return VoiceReply(**speech.carousel(found, offset))
+    return _shown(VoiceReply(**speech.carousel(found, offset)), shopper_id)
 
 
 @server.tool()
-def search_products(query: str, offset: int = 0) -> VoiceReply:
+def search_products(
+    query: str, offset: int = 0, shopper_id: str = DEFAULT_SHOPPER
+) -> VoiceReply:
     """Find products by what the shopper called them, three at a time."""
     found = catalogue.search(query)
     if not found:
@@ -80,33 +104,45 @@ def search_products(query: str, offset: int = 0) -> VoiceReply:
             speech=f"I could not find anything for {query}.",
             ok=False,
         )
-    return VoiceReply(**speech.carousel(found, offset))
+    return _shown(VoiceReply(**speech.carousel(found, offset)), shopper_id)
 
 
 @server.tool()
-def describe_product(sku: str) -> VoiceReply:
-    """Everything about one product, for when the shopper asks to hear more."""
-    product = catalogue.get(sku)
-    if product is None:
-        return VoiceReply(speech="I cannot find that item.", ok=False)
+def describe_product(item: str, shopper_id: str = DEFAULT_SHOPPER) -> VoiceReply:
+    """Everything about one product, for when the shopper asks to hear more.
 
+    `item` is whatever they said: a SKU, a position in the list you just read
+    out ("the second one"), or a name ("the honey").
+    """
+    sku, problem = _pick(item, shopper_id)
+    if problem is not None:
+        return problem
+
+    product = catalogue.get(sku)
     lines = [speech.product_line(product), product.blurb]
     if product.heavy:
         lines.append("It is heavy, so someone should be there to take it.")
-    return VoiceReply(
-        speech=" ".join(lines),
-        cards=[speech.product_card(product)],
+    return _shown(
+        VoiceReply(speech=" ".join(lines), cards=[speech.product_card(product)]),
+        shopper_id,
     )
 
 
 @server.tool()
 def add_to_cart(
-    sku: str, quantity: int = 1, shopper_id: str = DEFAULT_SHOPPER
+    item: str, quantity: int = 1, shopper_id: str = DEFAULT_SHOPPER
 ) -> VoiceReply:
-    """Put an item in the basket. Quantity is clamped to what is in stock."""
+    """Put an item in the basket. Quantity is clamped to what is in stock.
+
+    `item` is whatever they said: a SKU, a position in the list you just read
+    out ("the second one"), or a name ("the honey"). When a phrase could mean
+    more than one product, nothing is added and the reply asks which.
+    """
+    sku, problem = _pick(item, shopper_id)
+    if problem is not None:
+        return problem
+
     product = catalogue.get(sku)
-    if product is None:
-        return VoiceReply(speech="I cannot find that item.", ok=False)
     if not product.available:
         return VoiceReply(speech=f"{product.name} is out of stock.", ok=False)
 
@@ -127,9 +163,20 @@ def add_to_cart(
 
 
 @server.tool()
-def remove_from_cart(sku: str, shopper_id: str = DEFAULT_SHOPPER) -> VoiceReply:
-    """Take an item back out of the basket."""
+def remove_from_cart(item: str, shopper_id: str = DEFAULT_SHOPPER) -> VoiceReply:
+    """Take an item back out of the basket.
+
+    `item` is whatever they said. "Take out the second one" resolves against
+    the basket as it was just read, not against the shop.
+    """
     cart = _cart(shopper_id)
+    if not cart.is_empty:
+        refer.remember(shopper_id or DEFAULT_SHOPPER, [line.sku for line in cart.lines])
+
+    sku, problem = _pick(item, shopper_id)
+    if problem is not None:
+        return problem
+
     product = catalogue.get(sku)
     removed = cart.remove(sku)
     carts.save(cart)
@@ -152,12 +199,16 @@ def read_cart(shopper_id: str = DEFAULT_SHOPPER) -> VoiceReply:
     The basket outlives the conversation, so this is what makes "carry on
     from yesterday" work for somebody with no browser tab to leave open.
     """
-    summary = speech.cart_summary(_cart(shopper_id))
-    return VoiceReply(
-        speech=summary["speech"],
-        cards=summary["cards"],
-        cart_total=summary["total"],
-        line_count=summary["line_count"],
+    cart = _cart(shopper_id)
+    summary = speech.cart_summary(cart)
+    return _shown(
+        VoiceReply(
+            speech=summary["speech"],
+            cards=summary["cards"],
+            cart_total=summary["total"],
+            line_count=summary["line_count"],
+        ),
+        shopper_id,
     )
 
 

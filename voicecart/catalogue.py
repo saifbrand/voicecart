@@ -63,12 +63,12 @@ def in_category(category: str) -> list[Product]:
     return [p for p in _load() if p.category.casefold() == wanted]
 
 
-def _words(text: str) -> set[str]:
+def words_of(text: str) -> set[str]:
     """Whole words, singular. Speech gives you words, not substrings."""
-    return {_singular(w) for w in re.findall(r"[a-z0-9]+", text.casefold())}
+    return {singular(w) for w in re.findall(r"[a-z0-9]+", text.casefold())}
 
 
-def _singular(word: str) -> str:
+def singular(word: str) -> str:
     return word[:-1] if len(word) > 3 and word.endswith("s") else word
 
 
@@ -79,14 +79,14 @@ def search(query: str) -> list[Product]:
     hand them honey as though they had asked for it. Ranking puts a name
     match above a description match, because the name is what they said.
     """
-    wanted = {w for w in _words(query) if len(w) > 1}
+    wanted = {w for w in words_of(query) if len(w) > 1}
     if not wanted:
         return []
 
     scored: list[tuple[int, Product]] = []
     for product in _load():
-        name_words = _words(product.name)
-        other_words = _words(f"{product.category} {product.blurb}")
+        name_words = words_of(product.name)
+        other_words = words_of(f"{product.category} {product.blurb}")
         score = 0
         for word in wanted:
             if word in name_words:

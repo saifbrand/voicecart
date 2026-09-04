@@ -82,8 +82,15 @@ async def test_a_whole_shopping_trip_over_streamable_http(endpoint):
             assert found["cards"], "a search should come back with something to show"
             sku = found["cards"][0]["sku"]
 
-            added = await speak(session, "add_to_cart", sku=sku, quantity=1)
+            added = await speak(session, "add_to_cart", item=sku, quantity=1)
             assert added["ok"] and added["cart_total"] > 0
+
+            # And the same thing said the way a person would say it.
+            await speak(session, "browse_category", category="Stationery")
+            by_position = await speak(session, "add_to_cart", item="the second one")
+            assert by_position["ok"], by_position["speech"]
+            by_name = await speak(session, "describe_product", item="the bamboo pen")
+            assert "bamboo" in by_name["speech"].casefold()
 
             # An order is never placed on the first ask.
             refused = await speak(session, "place_order", address="House 12, Dhanmondi")
