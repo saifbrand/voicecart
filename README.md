@@ -115,6 +115,23 @@ python -m voicecart.server          # http://127.0.0.1:8080/mcp
 
 Point any MCP client at `/mcp`. The server negotiates protocol `2025-11-25`.
 
+Then watch a whole visit play out as a conversation:
+
+```bash
+python demo.py
+```
+
+```
+  you    Then nine of the brass lamp.
+         -> add_to_cart(sku='LMP-007', quantity=9)
+  alexa  I could only add 3 of Brass table lamp, that is all there is.
+
+  you    Order it to House 12, Dhanmondi.
+         -> place_order(address='House 12, Dhanmondi')
+  alexa  That is 10,450 taka, paid in cash to the courier, delivered to
+         House 12, Dhanmondi. Say yes to place the order.
+```
+
 ```bash
 python -m pytest tests -q
 ```
@@ -134,6 +151,7 @@ orders are equally isolated behind `carts.py` and `orders.py`.
 ## Layout
 
 ```
+demo.py          a whole visit, played out on the terminal
 voicecart/
   server.py      the MCP server and its eleven tools
   models.py      the reply shape every tool declares
