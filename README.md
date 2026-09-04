@@ -196,18 +196,45 @@ python demo.py
 python -m pytest tests -q
 ```
 
-Twenty eight tests. Most cover the shop rules directly. Three start
+Forty three tests. Most cover the shop rules and the WooCommerce mapping directly. Three start
 the server as its own process and drive it through a real MCP client over
 Streamable HTTP: a whole shopping trip, an order confirmed by elicitation,
 and an order declined. The transport, the negotiated protocol version, the
 tool schemas and the shop rules are all exercised together.
 
-## How it fits a real shop
+## Point it at a real shop
 
-`catalogue.py` is the only file that knows where products come from. It
-reads a JSON catalogue shaped like a WooCommerce product payload, so
-pointing this at a live store is one function, not a rewrite. Carts and
-orders are equally isolated behind `carts.py` and `orders.py`.
+It already runs against live WooCommerce. Four settings, no code:
+
+```bash
+STORE_SOURCE=woocommerce
+WOO_BASE_URL=https://your-shop.example
+WOO_KEY=ck_...
+WOO_SECRET=cs_...
+```
+
+Products are then read from the shop and orders are written back into it as
+real cash-on-delivery orders, which appear in the shop's own order list.
+
+The work is not the HTTP, it is the mapping. A WooCommerce payload is
+written for a page, and a page can afford to be vague in ways a listener
+cannot skim past:
+
+| What the shop sends | What a listener gets |
+| --- | --- |
+| `<p>Strong &amp; malty leaf.</p>` and three more paragraphs | one sentence, no markup, no entities |
+| `stock_quantity: null` because stock management is off | the `instock` flag, read as availability |
+| `price: ""` on a variable parent | not offered at all, rather than offered at nothing |
+| `weight: 4.2` | "someone should be there to take it" |
+| an Allergens attribute | spoken every time, before the price |
+
+A spoken address goes into the order whole. Splitting "House 4, Lane 3,
+Uttara Sector 7" into WooCommerce's separate fields would mean guessing
+which part is the street, and a wrong guess puts a parcel somewhere else.
+
+`voicecart/woo.py` is the only file that knows WooCommerce exists. Sixteen
+tests cover it against a fake shop that serves each awkward row a real store
+produces, so they run offline.
 
 ## Layout
 
@@ -218,6 +245,7 @@ voicecart/
   models.py      the reply shape every tool declares
   speech.py      products turned into something worth hearing
   refer.py       working out which product somebody meant
+  woo.py         reading a live WooCommerce shop, and ordering from it
   catalogue.py   the storefront
   carts.py       baskets that outlive the conversation
   orders.py      placing and tracking, cash on delivery
@@ -226,6 +254,7 @@ data/
 tests/
   test_voicecart.py    the shop rules
   test_refer.py        what "the second one" means
+  test_woo.py          the live shop, against a fake one
   test_mcp_session.py  a whole trip over Streamable HTTP
 ```
 

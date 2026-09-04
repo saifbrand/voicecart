@@ -7,12 +7,18 @@ difference.
 from __future__ import annotations
 
 import json
+import os
 import re
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
 
 CATALOGUE_FILE = Path(__file__).resolve().parent.parent / "data" / "catalogue.json"
+
+
+def source() -> str:
+    """Where products come from: the bundled demo shop, or a live one."""
+    return os.environ.get("STORE_SOURCE", "demo").strip().casefold()
 
 
 @dataclass(frozen=True)
@@ -34,8 +40,24 @@ class Product:
 
 @lru_cache(maxsize=1)
 def _load() -> tuple[Product, ...]:
+    """The shop, read once.
+
+    A live shop is fetched here and cached for the process, because a voice
+    conversation asks about the catalogue many times in a minute and a
+    listener should not wait on the network between two sentences.
+    """
+    if source() == "woocommerce":
+        from voicecart import woo  # imported here: woo needs Product from us
+
+        return tuple(woo.fetch_products())
+
     rows = json.loads(CATALOGUE_FILE.read_text(encoding="utf-8"))
     return tuple(Product(**row) for row in rows)
+
+
+def refresh() -> None:
+    """Forget the cached shop, so the next question sees current stock."""
+    _load.cache_clear()
 
 
 def all_products() -> list[Product]:

@@ -68,11 +68,27 @@ def _new_id() -> str:
 
 
 def place(cart: Cart, address: str) -> Order:
+    """Record the order, and write it into the live shop when there is one.
+
+    The local record is kept either way, because order_status has to answer
+    the same question whichever shop is behind it.
+    """
     if cart.is_empty:
         raise ValueError("Cannot place an empty order.")
 
+    order_id = _new_id()
+    if catalogue.source() == "woocommerce":
+        from voicecart import woo
+
+        lines = [
+            (line.product, line.quantity)
+            for line in cart.lines
+            if line.product is not None
+        ]
+        order_id = woo.place_order(lines, address)
+
     order = Order(
-        id=_new_id(),
+        id=order_id,
         shopper_id=cart.shopper_id,
         lines=[{"sku": line.sku,
                 "name": line.product.name if line.product else line.sku,
