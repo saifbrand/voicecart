@@ -90,6 +90,42 @@ A warning when the parcel is heavy enough that somebody should be at the
 door. Low stock when there are three left. None of that is decoration on a
 voice channel, it is the label you cannot pick up and read.
 
+## More than a tool list
+
+Most MCP servers expose tools and stop. This one uses the rest of the
+protocol where the rest of the protocol is the right answer.
+
+**Resources**, because reading is not an action. An assistant deciding what
+to say next should not have to invoke something to find out what is already
+true. `shop://catalogue`, `shop://category/{name}`, `shop://cart/{shopper}`
+and `shop://order/{id}` are the same facts, addressable, with no side effect
+attached.
+
+**Completion**, so the assistant says a department that exists rather than
+guessing at one, and can complete an `item` against the products it just
+read out.
+
+**A prompt**, `shop_by_voice`, which tells a client how to run this
+conversation: read the speech field exactly, pass the shopper's own words
+through as `item`, never read a SKU aloud.
+
+**Elicitation**, which is the interesting one. The order is never placed on
+the assistant's own judgement. If the client can ask, the shop asks it
+directly through the protocol and waits:
+
+```
+place_order(address="House 90, Bashundhara")
+  -> elicit: "That is 320 taka, paid in cash to the courier, delivered to
+              House 90, Bashundhara. Say yes to place the order."
+  -> accepted: place_the_order = true
+  <- "Ordered. Your number is 21, 8570."
+```
+
+Elicitation is optional in MCP, so this degrades rather than fails. A client
+that cannot ask gets the same question handed back as speech, for the
+assistant to put in its own words. Either way nothing is ordered without a
+yes; only the route the question travels changes.
+
 ## Cash on delivery, and why that matters here
 
 This shop is paid in cash when the courier arrives, which is how most of
@@ -160,10 +196,11 @@ python demo.py
 python -m pytest tests -q
 ```
 
-Twenty six tests. All but one cover the shop rules directly. The last starts
-the server as its own process and drives a whole shopping trip through the
-MCP client over Streamable HTTP, so the transport, the protocol version, the
-tool schemas and the rules are all exercised together.
+Twenty eight tests. Most cover the shop rules directly. Three start
+the server as its own process and drive it through a real MCP client over
+Streamable HTTP: a whole shopping trip, an order confirmed by elicitation,
+and an order declined. The transport, the negotiated protocol version, the
+tool schemas and the shop rules are all exercised together.
 
 ## How it fits a real shop
 

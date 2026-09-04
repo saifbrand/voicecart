@@ -17,6 +17,7 @@ from pathlib import Path
 import pytest
 from mcp import ClientSession
 from mcp.client.streamable_http import streamable_http_client
+from mcp.types import ElicitResult
 
 ROOT = Path(__file__).resolve().parent.parent
 REQUIRED_PROTOCOL = "2025-11-25"
@@ -118,3 +119,49 @@ async def test_a_whole_shopping_trip_over_streamable_http(endpoint):
 @pytest.fixture(scope="module")
 def anyio_backend():
     return "asyncio"
+
+
+@pytest.mark.anyio
+async def test_the_shop_can_ask_the_shopper_itself(endpoint):
+    """Elicitation: the order is put to the shopper through the protocol.
+
+    A client that can ask gets asked, and one call is enough. A client that
+    cannot still never has an order placed for it, it just gets the question
+    handed back. Both paths are covered: this one, and the refusal in the
+    trip above, which runs on a session with no elicitation support.
+    """
+    asked: list[str] = []
+
+    async def confirm(context, params):
+        asked.append(params.message)
+        return ElicitResult(action="accept", content={"place_the_order": True})
+
+    async with streamable_http_client(endpoint) as (read, write):
+        async with ClientSession(read, write, elicitation_callback=confirm) as session:
+            await session.initialize()
+
+            await speak(session, "add_to_cart", item="TEA-001", quantity=1)
+            placed = await speak(session, "place_order",
+                                 address="House 90, Bashundhara")
+
+            assert placed["ok"] and placed["order_id"]
+            assert asked, "the shop should have asked before ordering"
+            assert "cash" in asked[0]
+            assert "House 90, Bashundhara" in asked[0]
+
+
+@pytest.mark.anyio
+async def test_a_refusal_leaves_the_basket_alone(endpoint):
+    async def decline(context, params):
+        return ElicitResult(action="decline")
+
+    async with streamable_http_client(endpoint) as (read, write):
+        async with ClientSession(read, write, elicitation_callback=decline) as session:
+            await session.initialize()
+
+            await speak(session, "add_to_cart", item="SOA-005", quantity=1)
+            refused = await speak(session, "place_order",
+                                  address="House 90, Bashundhara")
+
+            assert refused["ok"] is False
+            assert refused["cart_total"] > 0, "a no must not empty the basket"

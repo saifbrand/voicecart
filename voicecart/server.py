@@ -10,9 +10,13 @@ needs to be able to change its mind between them.
 """
 from __future__ import annotations
 
+import json
 import os
+from dataclasses import asdict
 
-from mcp.server.mcpserver import MCPServer
+from mcp.server.mcpserver import AcceptedElicitation, Context, MCPServer
+from mcp.types import Completion
+from pydantic import BaseModel, Field
 
 from voicecart import carts, catalogue, orders, refer, speech
 from voicecart.models import VoiceReply
@@ -61,6 +65,39 @@ def _pick(item: str, shopper_id: str) -> tuple[str | None, VoiceReply | None]:
     if found.found:
         return found.sku, None
     return None, VoiceReply(speech=found.reason, ok=False)
+
+
+async def _ask_to_confirm(
+    ctx: Context | None, cart: carts.Cart, address: str
+) -> bool | None:
+    """Put the order to the shopper through the protocol, if we can.
+
+    Returns True or False when the shopper answered, and None when the
+    client cannot ask, in which case the caller hands the question back for
+    the assistant to put in its own words.
+
+    Elicitation is optional in MCP, so this is written to degrade rather
+    than fail: an order is still never placed without a yes, it is only the
+    route the question travels that changes.
+    """
+    if ctx is None:
+        return None
+
+    capabilities = ctx.client_capabilities
+    if capabilities is None or capabilities.elicitation is None:
+        return None
+
+    try:
+        answer = await ctx.elicit(
+            message=speech.confirmation_prompt(cart, address),
+            schema=Confirmation,
+        )
+    except Exception:  # noqa: BLE001 - never let asking cost somebody an order
+        return None
+
+    if isinstance(answer, AcceptedElicitation):
+        return bool(answer.data.place_the_order)
+    return False
 
 
 @server.tool()
@@ -235,27 +272,52 @@ def review_order(address: str, shopper_id: str = DEFAULT_SHOPPER) -> VoiceReply:
     )
 
 
+class Confirmation(BaseModel):
+    """What the shopper is asked, when the client can ask on our behalf."""
+
+    place_the_order: bool = Field(
+        description="Yes to place this cash-on-delivery order, no to cancel."
+    )
+
+
 @server.tool()
-def place_order(
-    address: str, confirmed: bool = False, shopper_id: str = DEFAULT_SHOPPER
+async def place_order(
+    address: str,
+    confirmed: bool = False,
+    shopper_id: str = DEFAULT_SHOPPER,
+    ctx: Context | None = None,
 ) -> VoiceReply:
     """Place the order, cash on delivery.
 
-    `confirmed` must be true, and it should only be true after the shopper
-    has heard review_order and said yes. Nothing is charged now, so no
-    payment detail is ever asked for.
+    The order is never placed on the strength of the assistant's own
+    judgement. Either `confirmed` is already true because the shopper heard
+    review_order and said yes, or this asks them directly through the
+    protocol's elicitation and waits for the answer.
+
+    Nothing is charged now, so no payment detail is ever asked for.
     """
     cart = _cart(shopper_id)
     if cart.is_empty:
         return VoiceReply(speech="Your basket is empty.", ok=False)
+
     if not confirmed:
-        return VoiceReply(
-            speech=speech.confirmation_prompt(cart, address),
-            needs_confirmation=True,
-            ok=False,
-            cart_total=cart.total,
-            address=address,
-        )
+        agreed = await _ask_to_confirm(ctx, cart, address)
+        if agreed is None:
+            # The client cannot ask, so hand the question back for the
+            # assistant to put to the shopper itself.
+            return VoiceReply(
+                speech=speech.confirmation_prompt(cart, address),
+                needs_confirmation=True,
+                ok=False,
+                cart_total=cart.total,
+                address=address,
+            )
+        if agreed is False:
+            return VoiceReply(
+                speech="Left it in your basket, nothing ordered.",
+                ok=False,
+                cart_total=cart.total,
+            )
 
     order = orders.place(cart, address)
     cart.last_order_skus = [line.sku for line in cart.lines]
@@ -312,6 +374,134 @@ def reorder_last(shopper_id: str = DEFAULT_SHOPPER) -> VoiceReply:
         cards=summary["cards"],
         cart_total=summary["total"],
         line_count=summary["line_count"],
+    )
+
+
+# ---------------------------------------------------------------------------
+# Resources: the shop as something to read, not only something to call.
+#
+# A tool call is an action. Reading the basket to decide what to say next is
+# not an action, and an assistant should not have to invoke one to find out
+# what it already knows. These are the same facts, addressable and cacheable,
+# with no side effect attached.
+# ---------------------------------------------------------------------------
+
+
+@server.resource(
+    "shop://catalogue",
+    name="Catalogue",
+    description="Every product in the shop, with price, unit and stock.",
+    mime_type="application/json",
+)
+def catalogue_resource() -> str:
+    return json.dumps(
+        [speech.product_card(p) for p in catalogue.all_products()], indent=2
+    )
+
+
+@server.resource(
+    "shop://category/{name}",
+    name="Category",
+    description="One department of the shop.",
+    mime_type="application/json",
+)
+def category_resource(name: str) -> str:
+    return json.dumps(
+        [speech.product_card(p) for p in catalogue.in_category(name)], indent=2
+    )
+
+
+@server.resource(
+    "shop://cart/{shopper_id}",
+    name="Basket",
+    description="What this shopper has in their basket right now.",
+    mime_type="application/json",
+)
+def cart_resource(shopper_id: str) -> str:
+    cart = _cart(shopper_id)
+    return json.dumps(
+        {
+            "lines": [
+                {"sku": line.sku, "quantity": line.quantity, "subtotal": line.subtotal}
+                for line in cart.lines
+            ],
+            "total": cart.total,
+        },
+        indent=2,
+    )
+
+
+@server.resource(
+    "shop://order/{order_id}",
+    name="Order",
+    description="One order and where it has reached.",
+    mime_type="application/json",
+)
+def order_resource(order_id: str) -> str:
+    order = orders.get(order_id)
+    if order is None:
+        return json.dumps({"error": "no such order"})
+    return json.dumps(asdict(order), indent=2)
+
+
+# ---------------------------------------------------------------------------
+# Completion: help the assistant say a real category, rather than guess one.
+# ---------------------------------------------------------------------------
+
+
+@server.completion()
+async def complete(ref, argument, context):
+    """Suggest values for an argument the assistant is part way through.
+
+    Only worth doing where the shop knows the answer and the assistant
+    cannot: department names, and the products it just read out.
+    """
+    typed = (argument.value or "").casefold()
+
+    if argument.name == "category":
+        matches = [c for c in catalogue.categories() if c.casefold().startswith(typed)]
+        return Completion(values=matches, total=len(matches), hasMore=False)
+
+    if argument.name == "item":
+        shopper = (context.arguments or {}).get("shopper_id") if context else None
+        shown = refer.recent(shopper or DEFAULT_SHOPPER)
+        names = [p.name for p in (catalogue.get(sku) for sku in shown) if p]
+        if not names:
+            names = [p.name for p in catalogue.all_products()]
+        matches = [n for n in names if typed in n.casefold()][:10]
+        return Completion(values=matches, total=len(matches), hasMore=False)
+
+    return Completion(values=[], total=0, hasMore=False)
+
+
+# ---------------------------------------------------------------------------
+# Prompt: how to run this conversation, for a client that wants telling.
+# ---------------------------------------------------------------------------
+
+
+@server.prompt(
+    name="shop_by_voice",
+    title="Shop by voice",
+    description="How to help somebody shop this store without a screen.",
+)
+def shop_by_voice_prompt(shopper_id: str = DEFAULT_SHOPPER) -> str:
+    return "\n\n".join(
+        [
+            "You are helping somebody shop who is not looking at a screen.",
+            f"Use shopper_id {shopper_id} on every call, so their basket is "
+            "theirs and survives until tomorrow.",
+            "Read the speech field back exactly. It is already the right "
+            "length and says the disqualifying facts first. Do not summarise "
+            "it, do not add the card contents to it, and never read a SKU "
+            "aloud.",
+            "When they refer to something by position or name, pass their "
+            "words straight through as `item` and let the shop resolve them. "
+            "If it answers with a question, ask that question rather than "
+            "choosing for them.",
+            "Before ordering, read review_order out and wait for a clear yes. "
+            "Never ask for payment details: this shop is paid in cash at the "
+            "door.",
+        ]
     )
 
 
