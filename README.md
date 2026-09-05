@@ -262,6 +262,14 @@ tests/
   test_mcp_session.py  a whole trip over Streamable HTTP
 ```
 
+## Building this
+
+[FRICTION-LOG.md](FRICTION-LOG.md) records what cost time while building
+against the MCP Python SDK and the Alexa+ track: what I expected, what
+happened, and what I would change. It includes the things that worked, and
+the one gap that mattered most, which is that there is no way to test an
+Alexa+ integration against Alexa+.
+
 ## Licence
 
 MIT. See [LICENSE](LICENSE).
