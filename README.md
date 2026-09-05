@@ -182,8 +182,12 @@ python demo.py
 ```
 
 ```
-  you    Then nine of the brass lamp.
-         -> add_to_cart(sku='LMP-007', quantity=9)
+  you    Add the second one.
+         -> add_to_cart(item='the second one')
+  alexa  Added Cotton hand towel, pair. Your basket is now 1,330 taka.
+
+  you    And nine of the brass lamp.
+         -> add_to_cart(item='brass lamp', quantity=9)
   alexa  I could only add 3 of Brass table lamp, that is all there is.
 
   you    Order it to House 12, Dhanmondi.
