@@ -6,3 +6,5 @@ data/carts.json
 submission/
 data/orders.json
 data/recent.json
+measure/shops.json
+measure/results.json
