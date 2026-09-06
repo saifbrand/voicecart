@@ -64,6 +64,8 @@ TRIP = [
     ("Show me the home and bath things.", "browse_category",
      {"category": "Home and bath"}),
     ("Add the second one.", "add_to_cart", {"item": "the second one"}),
+    ("No, take that back.", "repair", {"said": "take the last one back"}),
+    ("Add the third one instead.", "add_to_cart", {"item": "the third one"}),
     ("And nine of the brass lamp.", "add_to_cart",
      {"item": "brass lamp", "quantity": 9}),
     ("Add some cotton.", "add_to_cart", {"item": "cotton"}),
@@ -91,8 +93,11 @@ class Scene:
 
 # --- talking to the server -------------------------------------------------
 
-async def capture(url: str) -> tuple[list[Line], dict]:
+async def capture(url: str) -> tuple[list[Line], dict, list[int]]:
     lines: list[Line] = []
+    # Where each exchange ends, so a scene can point at "after the fourth
+    # thing they said" instead of a line number that moves when the trip does.
+    marks: list[int] = []
     async with streamable_http_client(url) as (read, write):
         async with ClientSession(read, write) as session:
             init = await session.initialize()
@@ -115,7 +120,8 @@ async def capture(url: str) -> tuple[list[Line], dict]:
                 for chunk in textwrap.wrap(reply.get("speech", ""), 66) or [""]:
                     lines.append(Line(chunk, colour, indent=True))
                 lines.append(Line("", INK["text"]))
-            return lines, facts
+                marks.append(len(lines))
+            return lines, facts, marks
 
 
 # --- speech ----------------------------------------------------------------
@@ -217,51 +223,57 @@ def surface(facts: dict) -> Image.Image:
 
 # --- assembly --------------------------------------------------------------
 
-def script(lines: list[Line], facts: dict) -> list[Scene]:
+def script(lines: list[Line], facts: dict, marks: list[int]) -> list[Scene]:
     header = (f"MCP protocol {facts['protocol']}   {facts['tools']} tools   "
               f"Streamable HTTP")
 
-    def upto(n):
-        return {"upto": n, "header": header}
+    def after(exchange: int):
+        """Show the conversation up to the end of the nth thing said."""
+        return {"upto": marks[exchange - 1], "header": header}
 
     return [
         Scene("VoiceCart. A whole storefront you can shop by voice, with no "
               "screen at any point.", "title"),
         Scene("Online shopping assumes you can see. A screen reader makes a "
-              "shop operable, but not quick: you cannot skim a list you have "
-              "to listen to.", "problem"),
+              "shop operable, but not quick. Measured across seven live "
+              "shops: ninety eight words before one product is named. This "
+              "finishes a whole order in a hundred and nineteen.", "problem"),
         Scene("So results come three at a time, with a count of what is left, "
               "and the assistant offers rather than continues.",
-              "talk", upto(6)),
+              "talk", after(1)),
         Scene("And the disqualifying fact is said first. Out of stock lands "
               "before the price, so nobody spends a sentence deciding to buy "
-              "something they cannot have.", "talk", upto(8)),
+              "something they cannot have.", "talk", after(2)),
         Scene("Nobody says a product code out loud. On a screen you point; in "
               "a conversation you refer back. So the shop remembers the last "
-              "list it read you.", "talk", upto(13)),
+              "list it read you.", "talk", after(3)),
         Scene("Add the second one. Positions, names and a bare that one all "
-              "resolve against what was just spoken.", "talk", upto(16)),
+              "resolve against what was just spoken.", "talk", after(4)),
+        Scene("And speech corrects itself. Take that back is its own intent, "
+              "and it restores the whole basket rather than reversing an add, "
+              "because an add clamped to what was in stock cannot be undone by "
+              "subtracting.", "talk", after(6)),
         Scene("It will not oversell either. Nine were asked for, three exist, "
-              "and it says so.", "talk", upto(19)),
+              "and it says so.", "talk", after(7)),
         Scene("When a phrase could mean two products, nothing is added and it "
               "asks which. A wrong item in the basket of somebody who cannot "
-              "see it is worse than a second question.", "talk", upto(22)),
+              "see it is worse than a second question.", "talk", after(8)),
         Scene("There is no review page to glance at before paying, so one "
               "sentence carries the amount and the address, and nothing else.",
-              "talk", upto(28)),
+              "talk", after(10)),
         Scene("And the order is never placed on the assistant's own judgement. "
               "If the client can ask, the shop asks through the protocol and "
-              "waits.", "talk", upto(31)),
+              "waits.", "talk", after(11)),
         Scene("The basket outlives the conversation, because a voice shopper "
               "has no browser tab to leave open. That is also what makes order "
-              "the usual mean something.", "talk", upto(len(lines))),
+              "the usual mean something.", "talk", after(12)),
         Scene("Underneath, this uses the rest of MCP, not only tools. "
               "Resources, because reading is not an action. Completion, a "
               "prompt, and elicitation.", "surface"),
         Scene("It runs against a live WooCommerce shop with four settings and "
               "no code changes. Orders are written back as real "
               "cash-on-delivery orders.", "woo"),
-        Scene("Forty three tests. One drives the whole thing through a real "
+        Scene("Seventy five tests. Four drive the whole thing through a real "
               "MCP client over Streamable HTTP. VoiceCart.", "close"),
     ]
 
@@ -279,7 +291,10 @@ def paint(scene: Scene, lines: list[Line], facts: dict) -> Image.Image:
                       ["A screen reader makes a shop operable.",
                        "It does not make it quick.",
                        "",
-                       "You cannot skim a list you have to hear."])
+                       "98 words before a shop names one product.",
+                       "119 words for a whole order here.",
+                       "",
+                       "Median of seven live WooCommerce shops."])
     elif scene.kind == "talk":
         canvas = conversation(lines, scene.payload["upto"], scene.payload["header"])
     elif scene.kind == "surface":
@@ -294,7 +309,7 @@ def paint(scene: Scene, lines: list[Line], facts: dict) -> Image.Image:
                        "Orders written back into it."])
     else:
         canvas = card("VoiceCart",
-                      ["43 tests. None need an API key.",
+                      ["75 tests. None need an API key.",
                        "Nothing dials, charges or ships without a yes.",
                        "",
                        "One file away from a live store."],
@@ -305,11 +320,11 @@ def paint(scene: Scene, lines: list[Line], facts: dict) -> Image.Image:
 
 def build(url: str, out: Path, work: Path) -> None:
     fresh_start()
-    lines, facts = asyncio.run(capture(url))
+    lines, facts, marks = asyncio.run(capture(url))
     work.mkdir(parents=True, exist_ok=True)
 
     clips, audio = [], []
-    scenes = script(lines, facts)
+    scenes = script(lines, facts, marks)
     for index, scene in enumerate(scenes):
         mp3 = work / f"{index:02d}.mp3"
         asyncio.run(speak(scene.say, mp3))
