@@ -18,7 +18,8 @@ from mcp.server.mcpserver import AcceptedElicitation, Context, MCPServer
 from mcp.types import Completion
 from pydantic import BaseModel, Field
 
-from voicecart import carts, catalogue, orders, refer, speech
+from voicecart import carts, catalogue, orders, refer, speech, subscriptions
+from voicecart import repair as corrections
 from voicecart.models import VoiceReply
 
 DEFAULT_SHOPPER = "demo-shopper"
@@ -38,9 +39,16 @@ server = MCPServer(
         "hearing the shopper agree. place_order refuses without it.\n"
         "3. This shop is cash on delivery. Never ask for a card, a bank "
         "account, or any payment detail. There is nothing to pay until the "
-        "courier arrives."
+        "courier arrives.\n\n"
+        "When the shopper corrects themselves - \"no, not that one\", \"take "
+        "the last one back\", \"start again\" - send their words to repair "
+        "rather than working out the undo yourself."
     ),
 )
+
+# Serve `resources/subscribe`, so a client can be told when a basket changes
+# rather than polling the resource. See voicecart/subscriptions.py.
+subscriptions.install(server)
 
 
 def _cart(shopper_id: str) -> carts.Cart:
@@ -61,8 +69,12 @@ def _shown(reply: VoiceReply, shopper_id: str) -> VoiceReply:
 
 def _pick(item: str, shopper_id: str) -> tuple[str | None, VoiceReply | None]:
     """Resolve what the shopper said, or hand back the question to ask."""
-    found = refer.resolve(item, shopper_id or DEFAULT_SHOPPER)
+    shopper = shopper_id or DEFAULT_SHOPPER
+    found = refer.resolve(item, shopper)
     if found.found:
+        # Remember what their words were taken to mean, so "no, not that
+        # one" has something to point at.
+        refer.note_resolved(shopper, found.sku)
         return found.sku, None
     return None, VoiceReply(speech=found.reason, ok=False)
 
@@ -166,8 +178,11 @@ def describe_product(item: str, shopper_id: str = DEFAULT_SHOPPER) -> VoiceReply
 
 
 @server.tool()
-def add_to_cart(
-    item: str, quantity: int = 1, shopper_id: str = DEFAULT_SHOPPER
+async def add_to_cart(
+    item: str,
+    quantity: int = 1,
+    shopper_id: str = DEFAULT_SHOPPER,
+    ctx: Context | None = None,
 ) -> VoiceReply:
     """Put an item in the basket. Quantity is clamped to what is in stock.
 
@@ -187,6 +202,7 @@ def add_to_cart(
     asked = quantity
     now = cart.add(sku, quantity)
     carts.save(cart)
+    await subscriptions.cart_changed(ctx, shopper_id or DEFAULT_SHOPPER)
 
     said = f"Added {product.name}."
     if now < asked:
@@ -200,7 +216,9 @@ def add_to_cart(
 
 
 @server.tool()
-def remove_from_cart(item: str, shopper_id: str = DEFAULT_SHOPPER) -> VoiceReply:
+async def remove_from_cart(
+    item: str, shopper_id: str = DEFAULT_SHOPPER, ctx: Context | None = None
+) -> VoiceReply:
     """Take an item back out of the basket.
 
     `item` is whatever they said. "Take out the second one" resolves against
@@ -221,12 +239,87 @@ def remove_from_cart(item: str, shopper_id: str = DEFAULT_SHOPPER) -> VoiceReply
     if not removed:
         return VoiceReply(speech="That was not in your basket.", ok=False)
 
+    await subscriptions.cart_changed(ctx, shopper_id or DEFAULT_SHOPPER)
+
     name = product.name if product else "that item"
     return VoiceReply(
         speech=f"Removed {name}. Your basket is now {speech.money(cart.total)}.",
         cart_total=cart.total,
         line_count=len(cart.lines),
     )
+
+
+@server.tool()
+async def repair(
+    said: str, shopper_id: str = DEFAULT_SHOPPER, ctx: Context | None = None
+) -> VoiceReply:
+    """Take back what the shopper says was wrong.
+
+    Pass their correction word for word: "no, not that one", "take the last
+    one back", "start again", "no, take the rice out". Speech corrects
+    itself constantly, and a listener who cannot see the basket has no way
+    to check what went in, so this is the one tool that walks the shop
+    backwards.
+
+    "Not that one" does two things: it undoes the change, and it stops the
+    shop offering that product again for the same words.
+    """
+    shopper = shopper_id or DEFAULT_SHOPPER
+    cart = _cart(shopper)
+    intent = corrections.classify(said)
+
+    if intent is corrections.Intent.CLEAR:
+        if cart.is_empty:
+            return VoiceReply(speech="Your basket is already empty.", ok=False)
+        cart.empty()
+        carts.save(cart)
+        await subscriptions.cart_changed(ctx, shopper)
+        return VoiceReply(
+            speech="Emptied your basket. What would you like?",
+            cart_total=0.0,
+            line_count=0,
+        )
+
+    if intent in (corrections.Intent.UNDO, corrections.Intent.REJECT):
+        was = {line.sku: line.quantity for line in cart.lines}
+        if not cart.undo():
+            return VoiceReply(
+                speech="There is nothing to take back.",
+                ok=False,
+                cart_total=cart.total,
+                line_count=len(cart.lines),
+            )
+        carts.save(cart)
+        await subscriptions.cart_changed(ctx, shopper)
+
+        # Name what actually went, rather than what the shop last thought
+        # they meant: after "the usual", those are not the same thing.
+        now = {line.sku: line.quantity for line in cart.lines}
+        gone = [sku for sku, count in was.items() if now.get(sku, 0) < count]
+        if intent is corrections.Intent.REJECT:
+            for sku in gone:
+                refer.reject(shopper, sku)
+
+        names = [p.name for p in (catalogue.get(sku) for sku in gone) if p]
+        undone = f"Took {' and '.join(names[:2])} back." if names else "Took that back."
+        left = (
+            "Your basket is empty."
+            if cart.is_empty
+            else f"Your basket is now {speech.money(cart.total)}."
+        )
+        asked = " What did you mean?" if intent is corrections.Intent.REJECT else ""
+        return VoiceReply(
+            speech=f"{undone} {left}{asked}",
+            cart_total=cart.total,
+            line_count=len(cart.lines),
+        )
+
+    if intent is corrections.Intent.REMOVE_NAMED:
+        named = corrections.strip_correction(said)
+        if named:
+            return await remove_from_cart(item=named, shopper_id=shopper, ctx=ctx)
+
+    return VoiceReply(speech="Take what back?", ok=False)
 
 
 @server.tool()
@@ -323,6 +416,7 @@ async def place_order(
     cart.last_order_skus = [line.sku for line in cart.lines]
     cart.clear()
     carts.save(cart)
+    await subscriptions.cart_changed(ctx, shopper_id or DEFAULT_SHOPPER)
 
     spoken_id = order.id.replace("-", ", ")
     return VoiceReply(
@@ -357,7 +451,9 @@ def order_status(order_id: str = "", shopper_id: str = DEFAULT_SHOPPER) -> Voice
 
 
 @server.tool()
-def reorder_last(shopper_id: str = DEFAULT_SHOPPER) -> VoiceReply:
+async def reorder_last(
+    shopper_id: str = DEFAULT_SHOPPER, ctx: Context | None = None
+) -> VoiceReply:
     """Refill the basket with the last order, which is what "the usual" means."""
     products = orders.reorderable(shopper_id)
     if not products:
@@ -367,6 +463,7 @@ def reorder_last(shopper_id: str = DEFAULT_SHOPPER) -> VoiceReply:
     for product in products:
         cart.add(product.sku, 1)
     carts.save(cart)
+    await subscriptions.cart_changed(ctx, shopper_id or DEFAULT_SHOPPER)
 
     summary = speech.cart_summary(cart)
     return VoiceReply(

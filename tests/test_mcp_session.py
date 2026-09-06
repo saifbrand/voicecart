@@ -14,6 +14,7 @@ import sys
 import time
 from pathlib import Path
 
+import anyio
 import pytest
 from mcp import ClientSession
 from mcp.client.streamable_http import streamable_http_client
@@ -165,3 +166,55 @@ async def test_a_refusal_leaves_the_basket_alone(endpoint):
 
             assert refused["ok"] is False
             assert refused["cart_total"] > 0, "a no must not empty the basket"
+
+
+@pytest.mark.anyio
+async def test_a_subscribed_client_is_told_when_the_basket_changes(endpoint):
+    """The basket is a resource, so it has to say when it stops being true.
+
+    A screen showing `shop://cart/{id}` goes stale the moment anything is
+    added, and without this the client has no way to know. The whole round
+    trip is exercised: the capability is advertised, the subscription is
+    accepted, and the notification arrives naming the right basket.
+    """
+    shopper = "subscriber"
+    uri = f"shop://cart/{shopper}"
+    told: list[str] = []
+
+    async def watch(message) -> None:
+        params = getattr(getattr(message, "root", message), "params", None)
+        heard = getattr(params, "uri", None)
+        if heard is not None:
+            told.append(str(heard))
+
+    async def heard_about(target: str) -> bool:
+        for _ in range(20):
+            if target in told:
+                return True
+            await anyio.sleep(0.1)
+        return False
+
+    async with streamable_http_client(endpoint) as (read, write):
+        async with ClientSession(read, write, message_handler=watch) as session:
+            init = await session.initialize()
+
+            resources = init.capabilities.resources
+            assert resources is not None and resources.subscribe, (
+                "a client cannot subscribe unless the server says it can"
+            )
+
+            await session.subscribe_resource(uri)
+            await speak(session, "add_to_cart", item="TEA-001",
+                        quantity=1, shopper_id=shopper)
+
+            assert await heard_about(uri), f"no update for {uri}; heard {told}"
+
+            # And the resource itself now reads back the change it announced.
+            contents = await session.read_resource(uri)
+            assert '"lines"' in contents.contents[0].text
+
+            told.clear()
+            await session.unsubscribe_resource(uri)
+            await speak(session, "add_to_cart", item="HON-003",
+                        quantity=1, shopper_id=shopper)
+            assert not await heard_about(uri), "a client that unsubscribed is done"

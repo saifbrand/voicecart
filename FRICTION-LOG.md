@@ -191,6 +191,82 @@ rather than infrastructure.
 
 ---
 
+## 7. `MCPServer` advertises no way to subscribe at 2025-11-25
+
+**Task** Let a client watch `shop://cart/{shopper_id}` and be told when the
+basket changes, instead of re-reading the resource to find out.
+
+**Steps** Called `ctx.notify_resource_updated(uri)` from the tools that
+change the basket, which is what the high-level API offers, then subscribed
+from a client and added something.
+
+**Expected** The subscribed client hears about it.
+
+**Actual** Nothing arrives, and the reason is two layers down.
+`notify_resource_updated` publishes to the `subscriptions/listen` bus, which
+is the 2026-07-28 mechanism. This server negotiates **2025-11-25** - the
+version the track requires - where subscriptions are `resources/subscribe`
+plus a `resources/updated` notification. `MCPServer` never registers a
+`resources/subscribe` handler, and `Server.get_capabilities` derives
+`resources.subscribe` at pre-2026 versions from whether that handler exists.
+So the server truthfully advertises `subscribe: false`, a well-behaved
+client never subscribes, and the only notification API the high-level server
+exposes goes somewhere that client is not listening.
+
+**Severity** Important. It is silent in both directions: no error on the
+server, and a client that correctly reads the capabilities simply never
+asks. A team would reasonably ship this believing subscriptions work,
+because the API they called returned cleanly.
+
+**Workaround** Registered `resources/subscribe` and `resources/unsubscribe`
+on `server._lowlevel_server` with `add_request_handler`, which also flips the
+advertised capability, and sent both notifications: the bus for modern
+clients and `session.send_resource_updated` for 2025-11-25 ones.
+
+**Suggestion** Either have `MCPServer` serve `resources/subscribe` while it
+still supports a version where that is the mechanism, or make
+`notify_resource_updated` fan out to both eras. Failing both, the docstring
+should say which era it reaches - it currently mentions the legacy path only
+in passing, at the bottom.
+
+---
+
+## 8. The `ServerSession` a handler is given does not survive the request
+
+**Task** Remember which client subscribed to which basket, so an update goes
+only to a client that asked for one.
+
+**Steps** Keyed the subscriptions on the `ServerSession` object handed to the
+`resources/subscribe` handler - the obvious key, and the one the type
+signature invites - then looked it up again from `ctx.session` inside the
+tool call.
+
+**Expected** One client, one session object.
+
+**Actual** Different objects. Over Streamable HTTP a fresh `ServerSession` is
+built per request, so the session that subscribed is not the session that
+later adds to the basket. Every lookup missed and every notification was
+dropped, with nothing logged anywhere.
+
+**Severity** Important, and nastier than it sounds because the wrong version
+behaves *exactly* like the right one until you check whether the client
+actually received anything. It also fails open in the tempting direction: the
+easy fix is to stop checking and notify everybody.
+
+**Workaround** Keyed on the transport's own `Mcp-Session-Id` header, which is
+stable across requests, reachable from both context shapes, and the actual
+identity of the connection. The private `session._connection` turned out to
+be stable too, but a private attribute is a worse dependency than a header
+the spec defines.
+
+**Suggestion** Give `ServerSession` (or the context) a public, connection-
+stable identifier. Every server that holds per-client state - subscriptions,
+rate limits, anything - needs one, and right now each has to rediscover that
+the session object is not it. A line in the `ServerSession` docstring saying
+it is per-request would save the discovery.
+
+---
+
 ## What worked well, for balance
 
 - **Elicitation is the right primitive for a confirmation.** Being able to

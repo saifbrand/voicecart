@@ -51,18 +51,66 @@ class Resolution:
 
 
 def remember(shopper_id: str, skus: list[str]) -> None:
-    """Record what was just read out, so it can be referred back to."""
-    RECENT_FILE.parent.mkdir(parents=True, exist_ok=True)
-    data = _read()
-    data[shopper_id] = skus
-    RECENT_FILE.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+    """Record what was just read out, so it can be referred back to.
+
+    A new list wipes the rejections: "not that one" was about the old list,
+    and holding it against a fresh one would silently hide a product.
+    """
+    _write(shopper_id, {"shown": skus, "rejected": [], "resolved": ""})
 
 
 def recent(shopper_id: str) -> list[str]:
-    return _read().get(shopper_id, [])
+    return _row(shopper_id).get("shown", [])
 
 
-def _read() -> dict[str, list[str]]:
+def resolved(shopper_id: str) -> str:
+    """What the last phrase was taken to mean."""
+    return _row(shopper_id).get("resolved", "")
+
+
+def note_resolved(shopper_id: str, sku: str) -> None:
+    row = _row(shopper_id)
+    row["resolved"] = sku
+    _write(shopper_id, row)
+
+
+def rejected(shopper_id: str) -> list[str]:
+    return _row(shopper_id).get("rejected", [])
+
+
+def reject(shopper_id: str, sku: str) -> None:
+    """Take one product out of the running.
+
+    "No, not that one" is not only an undo. It is also the shopper narrowing
+    what they meant, and the next attempt at the same words should not land
+    on the thing they just refused.
+    """
+    row = _row(shopper_id)
+    marked = row.get("rejected", [])
+    if sku and sku not in marked:
+        marked.append(sku)
+    row["rejected"] = marked
+    _write(shopper_id, row)
+
+
+def _row(shopper_id: str) -> dict:
+    row = _read().get(shopper_id)
+    if row is None:
+        return {}
+    # Baskets written before corrections existed hold a bare list of SKUs.
+    if isinstance(row, list):
+        return {"shown": row, "rejected": [], "resolved": ""}
+    return dict(row)
+
+
+def _write(shopper_id: str, row: dict) -> None:
+    RECENT_FILE.parent.mkdir(parents=True, exist_ok=True)
+    data = _read()
+    data[shopper_id] = row
+    RECENT_FILE.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+
+
+def _read() -> dict:
     if not RECENT_FILE.exists():
         return {}
     return json.loads(RECENT_FILE.read_text(encoding="utf-8"))
@@ -93,6 +141,7 @@ def resolve(phrase: str, shopper_id: str) -> Resolution:
         return Resolution(direct.sku)
 
     heard = recent(shopper_id)
+    refused = rejected(shopper_id)
     words = [w for w in re.findall(r"[a-z0-9]+", said) if w not in FILLER]
 
     # A position, but only when it is the whole of what they said. "second"
@@ -112,11 +161,12 @@ def resolve(phrase: str, shopper_id: str) -> Resolution:
     # read out, but only when one thing was. After a list of three, "that
     # one" is genuinely ambiguous and guessing would be worse than asking.
     if not words:
-        if len(heard) == 1:
-            return Resolution(heard[0])
+        standing = [sku for sku in heard if sku not in refused]
+        if len(standing) == 1:
+            return Resolution(standing[0])
         if not heard:
             return Resolution(None, "I have not read anything out yet.")
-        names = tuple(p.name for p in _products(heard)[:3])
+        names = tuple(p.name for p in _products(standing or heard)[:3])
         return Resolution(
             None,
             "Do you mean " + " or ".join(names) + "?",
@@ -125,7 +175,7 @@ def resolve(phrase: str, shopper_id: str) -> Resolution:
 
     # A name. Search what was just read out before searching the whole shop.
     for pool in (_products(heard), catalogue.all_products()):
-        matches = _by_name(words, pool)
+        matches = _without_refused(_by_name(words, pool), refused)
         if len(matches) == 1:
             return Resolution(matches[0].sku)
         if len(matches) > 1:
@@ -137,6 +187,19 @@ def resolve(phrase: str, shopper_id: str) -> Resolution:
             )
 
     return Resolution(None, f"I could not find {phrase}.")
+
+
+def _without_refused(
+    matches: list[catalogue.Product], refused: list[str]
+) -> list[catalogue.Product]:
+    """Drop what the shopper has already said no to, unless that leaves nothing.
+
+    If every match was refused, the phrase is handed back as it was: better
+    to offer the same thing again and be told no than to answer "I could not
+    find that" about something the shop plainly has.
+    """
+    standing = [product for product in matches if product.sku not in refused]
+    return standing or matches
 
 
 def _products(skus: list[str]) -> list[catalogue.Product]:

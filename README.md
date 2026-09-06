@@ -21,6 +21,12 @@ shopper working through a category page hears the navigation, the filters,
 the promo banner and the cookie notice before the first product, and has no
 way to skim past any of it.
 
+That is measured, not asserted. Across seven live WooCommerce shops, read
+through Chrome's own accessibility tree, **the median category page spends 98
+words before it names a single product** - and one spends 270. VoiceCart
+finishes an entire order in 119. The method, the numbers and the scripts that
+produce them are in **[MEASUREMENT.md](MEASUREMENT.md)**.
+
 A voice assistant can be quicker than a screen, not just an alternative to
 one. But only if the shop on the other end is built for listening. That is
 what this is.
@@ -101,6 +107,12 @@ true. `shop://catalogue`, `shop://category/{name}`, `shop://cart/{shopper}`
 and `shop://order/{id}` are the same facts, addressable, with no side effect
 attached.
 
+**Subscriptions**, so a client watching `shop://cart/{shopper}` is told when
+the basket stops being what it was, rather than polling to find out. The SDK
+does not serve `resources/subscribe` at `2025-11-25`, so the shop registers
+the handler itself - see `voicecart/subscriptions.py`, and the two entries it
+earned in the friction log.
+
 **Completion**, so the assistant says a department that exists rather than
 guessing at one, and can complete an `item` against the products it just
 read out.
@@ -134,9 +146,33 @@ nobody is ever asked to say a card number out loud, in a room, to a device.
 The server instructions tell the assistant never to ask for payment details
 at all. There is nothing to pay until somebody knocks.
 
+## Speech corrects itself
+
+A person shopping out loud does not issue clean commands. They say "no, not
+that one", "take the last one back", "start again" - and they say it halfway
+through the sentence they are already in. A shop that only understands
+forward motion makes the shopper carry the correction: remember what went in,
+name it exactly, ask for it to come out.
+
+So a correction is its own intent. `repair` takes the shopper's words
+verbatim and walks the shop backwards:
+
+| said | what happens |
+| --- | --- |
+| "take the last one back" | the basket goes back to what it was before the last change |
+| "no, not that one" | the same undo, **and** that product stops being offered for those words |
+| "start again" | the basket empties - and that can itself be taken back |
+| "no, take the rice out" | the apology is stripped off and the rice comes out |
+
+The undo is a snapshot of the whole basket, not a reversed operation, because
+an add is not reversible on its own: it may have been clamped to what was in
+stock, or merged into a line already there. Only an order cannot be undone -
+handing somebody back a basket they have already bought would be a lie about
+what they owe.
+
 ## The tools
 
-Eleven small tools rather than one large `shop` tool, because a conversation
+Twelve small tools rather than one large `shop` tool, because a conversation
 arrives one intent at a time and changes its mind between them.
 
 | Tool | What it does |
@@ -147,6 +183,7 @@ arrives one intent at a time and changes its mind between them.
 | `describe_product` | The longer description, on request |
 | `add_to_cart` | Clamped to real stock, never oversells |
 | `remove_from_cart` | Takes it back out |
+| `repair` | "No, not that one" - undoes, and stops offering it |
 | `read_cart` | Reads the basket, including yesterday's |
 | `review_order` | The spoken review page. Places nothing |
 | `place_order` | Cash on delivery, refuses without confirmation |
@@ -200,11 +237,13 @@ python demo.py
 python -m pytest tests -q
 ```
 
-Forty three tests. Most cover the shop rules and the WooCommerce mapping directly. Three start
-the server as its own process and drive it through a real MCP client over
-Streamable HTTP: a whole shopping trip, an order confirmed by elicitation,
-and an order declined. The transport, the negotiated protocol version, the
-tool schemas and the shop rules are all exercised together.
+Seventy five tests. Most cover the shop rules, the corrections and the
+WooCommerce mapping directly. Four start the server as its own process and
+drive it through a real MCP client over Streamable HTTP: a whole shopping
+trip, an order confirmed by elicitation, an order declined, and a client
+subscribing to a basket and being told when it changes. The transport, the
+negotiated protocol version, the tool schemas and the shop rules are all
+exercised together.
 
 ## Point it at a real shop
 
@@ -245,19 +284,26 @@ produces, so they run offline.
 ```
 demo.py          a whole visit, played out on the terminal
 voicecart/
-  server.py      the MCP server and its eleven tools
+  server.py      the MCP server and its twelve tools
   models.py      the reply shape every tool declares
   speech.py      products turned into something worth hearing
   refer.py       working out which product somebody meant
+  repair.py      working out what somebody is taking back
+  subscriptions.py  telling a client the basket changed
   woo.py         reading a live WooCommerce shop, and ordering from it
   catalogue.py   the storefront
   carts.py       baskets that outlive the conversation
   orders.py      placing and tracking, cash on delivery
 data/
   catalogue.json the demo shop
+measure/
+  screen_reader_cost.py  what a shop says before its first product
+  voice_cost.py          what this shop says for a whole order
 tests/
   test_voicecart.py    the shop rules
   test_refer.py        what "the second one" means
+  test_repair.py       taking things back
+  test_subscriptions.py  who gets told, and who does not
   test_woo.py          the live shop, against a fake one
   test_mcp_session.py  a whole trip over Streamable HTTP
 ```
